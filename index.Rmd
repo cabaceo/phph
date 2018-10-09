@@ -1,0 +1,265 @@
+---
+title: "Survival Analysis Demo"
+output: 
+  flexdashboard::flex_dashboard:
+    storyboard: true          
+    social: menu
+---
+
+```{r setup, include=FALSE, message=FALSE}
+library(dplyr)
+library(tidyr)
+library(ezplot)
+library(survival)
+library(flexdashboard)
+
+# load data
+load("sysdata.rda")
+
+# set color-blind friendly colors
+red = "#D55E00"
+blue = "#0072B2"
+green = "#009E73"
+yellow = "#F0E442"
+purple = "#CC79A7"
+```
+
+### About
+
+Radiotherapy has dramatically improved prognosis for patients with Hodgkin 
+disease (HD) in the last several decades. Unfortunately, its carcinogenic nature 
+has caused a significant increase in the risk of secondary malignancies in HD survivors. Secondary cancers are the leading cause of death among 15-year 
+HD survivors. Breast cancer is the most common solid tumor diagnosed in female HD survivors and the risk varies with patient and treatment-related factors. 
+
+The dataset used in this demo contains breast cancer incidence in HD female 
+survivors, as well as age at treatment, site treated, ovarian function, 
+radiotherapy dose, and other treatment modalities.
+
+The goal is to investigate the time to the onset of breast cancer in patients 
+with HD treated with and without radiotherapy. In search for an adequate model 
+for the data, we tried a number of survival models, namely, the non-parametric
+Kaplan Meier estimates, the classic cox regression, the proportional odds model 
+and the PHPH cure model, investigating difference in breast cancer specific 
+survival probabilities between patients who received radiotherapy and patients 
+who did not.
+
+Made by [Cabaceo LLC](https://cabaceo.com).
+
+
+### Time to breast cancer
+
+```{r}
+plt = mk_boxplot(dat)
+p = plt("RT", "TTOBRC", notched = T)
+add_labs(p, ylab = "Months",
+         title = "Distribution of months to breast cancer onset 
+         or end of follow-up period",
+         subtitle = "Breast cancer tended to develop sooner for patients with
+         radiotherapy than those without.")
+```
+
+### Breast cancer incidents
+
+```{r}
+df = dat %>% mutate(STATUS = ifelse(STATUS == 1, "Breast cancer", 
+                                    "No breast cancer"))
+plt = mk_barplot_freq(df)
+p = plt("RT", "STATUS")
+add_labs(p, title = "Distribution of event status by treatment",
+         subtitle = "Breast cancer incidence among patients without radiotherapy
+         is more than double of that among patients with radiotherapy.")
+```
+
+
+### Kaplan Meier
+
+```{r}
+km = survfit(Surv(TTOBRC, STATUS) ~ RT, data = dat, type = "kaplan-meier")        
+plot(km, lty=c(1, 1), lwd=c(3, 3), col=c(red, blue), ylim=c(0.86, 1), 
+     xlab = "Months to breast cancer onset or end of follow-up period", 
+     ylab = "Proportion of cancer-free patients", 
+     main = "Kaplan-Meier", 
+     cex.axis = 1, cex.lab = 1, cex.main=1.5)
+legend("topright", lty=c(1, 1), lwd=c(3, 3), text.font=1.5,
+       legend = c("KM: no radiotherapy", "KM: radiotherapy"), 
+       col = c(red, blue))
+```
+
+***
+
+Looking at the Kaplan-Meier curves on the left, we see in the short term, 
+patients who received radiotherapy had a higher proportion of cancer-free 
+patients and hence lower breast cancer incidence than patients without 
+radiotherapy, but in the long term, patients with radiotherapy had a higher 
+breast cancer incidence than patients without. This observation leads to the 
+following hypothesis: radiotherapy decreases the risk of breast cancer in the 
+short term, but increases the risk in the long term.
+
+
+### Cox Model
+
+```{r}
+# run cox model
+cox = coxph(Surv(TTOBRC, STATUS) ~ RT, data=dat, method="breslow")
+df_coef = broom::tidy(cox) %>% 
+        mutate(`exp(est)` = exp(estimate)) %>% 
+        rename(est = estimate, `p-val` = p.value) %>% 
+        select(term, est, `exp(est)`, `p-val`)
+
+# calculate predicted survival rates
+survcurve.cox.notreat = survexp(~RT, data=radio, ratetable=cox, cohort=TRUE)
+survcurve.cox.treat = survexp(~RT, data=noradio, ratetable=cox,  cohort=TRUE)
+
+# generate KM plot with survival curves overlayed 
+km = survfit(Surv(TTOBRC, STATUS) ~ RT, data=dat, type="kaplan-meier")
+plot(km, lty=c(1, 1), lwd=c(3, 3), col=c(red, blue), ylim=c(0.86, 1), 
+     xlab = "Months to breast cancer onset or end of follow-up period", 
+     ylab = "Proportion of cancer-free patients", 
+     main = "Kaplan-Meier vs. Cox Model",
+     cex.axis = 1, cex.lab = 1, cex.main=1.5)
+
+lines(survcurve.cox.notreat, col=green, ylim=c(0.86,1), lty=1, lwd=3)
+lines(survcurve.cox.treat, col=green, ylim=c(0.86,1), lty=2, lwd=3)
+legend("topright", lty=c(1,1,1,2), lwd=rep(3, 4), text.font=1.5,
+       legend=c("KM: no radiotherapy", "KM: radiotherapy", 
+                "Cox: no radiotherapy", "Cox: radiotherapy"), 
+       col=c(red, blue, green, green))
+```
+
+***
+```{r}
+knitr::kable(df_coef, digits = 3, caption = "Model parameter estimate")
+```
+
+The parameter estimate of the treatment variable has a p-value greater than 0.05, indicating the effect of radiotherapy is not statistically significant under 
+the Cox model.
+
+This plot on the left shows the Cox model fits the data poorly. The cox model 
+fails to describe the data because it doesn't account for the possibility that
+short and long term effects of the treatment on the hazard can be in opposite direction.
+
+### PO Model
+
+```{r}
+# download source from https://cran.r-project.org/src/contrib/Archive/nltm/
+# install pkg via
+# install.packages("~/Coding/R/Rpkg/nltm", repos=NULL, type="source")
+
+# run po model
+invisible(capture.output(
+        po <- nltm::nltm(Surv(TTOBRC, STATUS)~RT, data=dat, nlt.model="PO")
+        ))
+
+# extract beta hats and collect into the correct format for output
+summ = summary(po)
+vars = c("coef", "exp(coef)", "p")
+df_coef = c(row.names(summ$coef), round(summ$coef[, vars], 3))
+df_coef = data.frame(rbind(df_coef))
+names(df_coef) = c("term", "est", "exp(est)", "p-val")
+row.names(df_coef) = NULL
+
+# calculate survival probabilities for (no radiotherapy) and (radiotherapy)
+po.baselineSF = cumprod(po$surv)
+po.noradioSF = 1/(1-log(po.baselineSF))
+betas = po$coef
+po.radioSF = exp(betas)/(exp(betas)-log(po.baselineSF))
+eventTimes = sort(unique(dat$TTOBRC[dat$STATUS==1]))        
+
+# generate KM plot with survival curves overlayed 
+km = survfit(Surv(TTOBRC, STATUS) ~ RT, data=dat, type="kaplan-meier")        
+plot(km, lty=c(1, 1), lwd=c(3, 3), col=c(red, blue), ylim=c(0.86, 1), 
+     xlab = "Months to breast cancer onset or end of follow-up period", 
+     ylab = "Proportion of cancer-free patients", 
+     main = "Kaplan-Meier vs. PO Model",
+     cex.axis = 1, cex.lab = 1, cex.main=1.5)
+
+lines(eventTimes, po.noradioSF, type='s', col=yellow, lty=1, lwd=3, ylim=c(0.86,1))
+lines(eventTimes, po.radioSF, type='s', col=yellow, lty=2, lwd=3, ylim=c(0.86,1))
+legend("topright", legend=c("KM: no radiotherapy", "KM: radiotherapy", 
+                            "PO: no radiotherapy", "PO: radiotherapy"),
+       lty=c(1, 1, 1, 2), lwd=rep(3, 4), text.font=1.5, 
+       col=c(red, blue, yellow, yellow)) 
+```
+
+***
+```{r}
+knitr::kable(df_coef, digits = 3, caption = "Model parameter estimate")
+```
+
+The parameter estimate of the treatment variable has a p-value greater than 0.05, indicating the effect of radiotherapy is not statistically significant under the proportional odds model.
+
+The plot on the left shows the proportional odds model fits the data poorly. The
+PO model fails to describe the data because the it also doesn't account for the 
+possibility that short and long term effects of the treatment on the hazard can 
+be in opposite direction.
+
+
+
+### PHPH Model
+
+```{r}
+# run phph model
+invisible(capture.output(
+        phph <- nltm::nltm(Surv(TTOBRC, STATUS)~RT, data=dat, nlt.model="PHPHC")
+        ))
+
+# extract beta hats and collect into the correct format for output
+summ = summary(phph)
+vars = c("coef", "exp(coef)", "p")
+row1 = c(row.names(summ$coef)[1], round(summ$coef[1, vars], 3))
+row2 = c(row.names(summ$coef)[2], round(summ$coef[2, vars], 3))
+row3 = c(row.names(summ$coef)[3], round(summ$coef[3, vars], 3))
+df_coef = data.frame(rbind(row1, row2, row3))
+names(df_coef) = c("term", "est", "exp(est)", "p-val")
+row.names(df_coef) = NULL
+
+# calculate survival probabilities for (no radiotherapy) and (radiotherapy)
+CureRate = phph$coeff[length(phph$coeff)]
+betas = phph$coeff
+# long-term predictor for subjects with radiotherapy treatment
+betasCure = betas[1:phph$nvar$pred.long]
+logtheta = CureRate + betasCure
+theta = exp(logtheta)
+# Short-term predictor for subjects with radiotherapy treatment
+betasNonCured = betas[phph$nvar$pred.long + 1:phph$nvar$pred.short]
+logeta = betasNonCured
+eta = exp(logeta)
+# unique event times sorted
+eventTimes = sort(unique(dat$TTOBRC[dat$STATUS==1]))
+# baseline survival function values corresponding to eventTimes
+phph.baselineSF = cumprod(phph$surv)
+# Survival function for subjects with radiotherapy
+phph.radioSF = exp(-theta*(1-phph.baselineSF^eta))
+# Survival function for subjects without radiotherapy
+phph.noradioSF = exp(-exp(CureRate)*(1-phph.baselineSF))
+
+# generate KM plot with survival curves overlayed 
+km = survfit(Surv(TTOBRC, STATUS) ~ RT, data=dat, type="kaplan-meier")        
+plot(km, lty=c(1, 1), lwd=c(3,3), col=c(red, blue), ylim=c(0.86, 1), 
+     xlab = "Months to breast cancer onset or end of follow-up period", 
+     ylab = "Proportion of cancer-free patients", 
+     main = "Kaplan-Meier vs. PHPH Cure Model",
+     cex.axis = 1, cex.lab = 1, cex.main=1.5)
+
+lines(eventTimes, phph.noradioSF, type='s', lty=1, lwd=3, ylim=c(0.86,1), col=purple)
+lines(eventTimes ,phph.radioSF, type='s', lty=2, lwd=3, ylim=c(0.86,1), col=purple)
+legend("topright", legend=c("KM: no radiotherapy", "KM: radiotherapy", 
+                            "PHPH: no radiotherapy", "PHPH: radiotherapy"),
+       lty=c(1,1,1,2), lwd=rep(3,4), text.font=2, 
+       col=c(red, blue, purple, purple))         
+```
+
+
+***
+```{r}
+knitr::kable(df_coef, digits = 3, caption = "Model parameter estimate")
+```
+
+The p-values are tiny, indicating the beta estimates are all statistically significant. In particular, the significant beta estimate for radiotherapy in the short term predictor implies radiotherapy has a negative effect on breast cancer
+incidence in the short term; the significant beta estimate for radiotherapy in 
+the long term predictor implies radiotherapy has a positive effect on breast 
+cancer incidence in the long run.
+
+The plot on the left shows the PHPHC cure model fits the data well. This is 
+because the phph cure model includes a term that captures the short term effect explicitly.
+
